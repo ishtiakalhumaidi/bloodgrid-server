@@ -231,7 +231,8 @@ async function run() {
     app.post("/blogs", async (req, res) => {
       const blog = req.body;
 
-      blog.createAt = new Date().toISOString();
+      blog.createdAt = new Date().toISOString();
+      blog.status = "published";
 
       try {
         const result = await blogsCollection.insertOne(blog);
@@ -243,6 +244,31 @@ async function run() {
       } catch (err) {
         console.error("Blog insertion error:", err);
         res.status(500).send({ message: "Failed to add the blog." });
+      }
+    });
+
+    // get blog
+    app.get("/blogs", async (req, res) => {
+      try {
+        const blogs = await blogsCollection
+          .find({ status: "published" })
+          .toArray();
+        res.send(blogs);
+      } catch (error) {
+        res.status(500).send({ error: "Failed to fetch blogs." });
+      }
+    });
+    // get blog details
+    app.get("/blogs/:id", async (req, res) => {
+      const id = req.params.id;
+      try {
+        const blog = await blogsCollection.findOne({ _id: new ObjectId(id) });
+        if (!blog) {
+          return res.status(404).send({ error: "Blog not found." });
+        }
+        res.send(blog);
+      } catch (error) {
+        res.status(500).send({ error: "Failed to fetch blog." });
       }
     });
 
