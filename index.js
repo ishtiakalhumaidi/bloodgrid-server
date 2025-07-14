@@ -26,6 +26,7 @@ async function run() {
   try {
     const db = client.db("bloodGrid_DB");
     const usersCollection = db.collection("users");
+    const requestsCollection = db.collection("requests");
 
     // add user to db
     app.post("/add-user", async (req, res) => {
@@ -85,12 +86,41 @@ async function run() {
         res.status(500).send({ error: "Failed to fetch user role." });
       }
     });
+    // get donor by search
+    app.get("/donors", async (req, res) => {
+      try {
+        const { bloodGroup, district, upazila } = req.query;
+
+        if (!bloodGroup || !district || !upazila) {
+          return res.status(400).json({ message: "All fields are required." });
+        }
+
+        const query = {
+          bloodGroup,
+          district,
+          upazila,
+          role: "donor",
+          status: "active",
+        };
+
+        console.log("Donor Search Query:", query);
+
+        const donors = await usersCollection.find(query).toArray();
+
+        console.log("Donors found:", donors.length);
+
+        res.status(200).json(donors);
+      } catch (err) {
+        console.error("Error fetching donors:", err);
+        res.status(500).json({ message: "Failed to fetch donors" });
+      }
+    });
 
     // user update
     app.put("/user/update/:email", async (req, res) => {
       const { email } = req.params;
       const updatedData = req.body;
-      console.log(updatedData)
+      console.log(updatedData);
 
       try {
         const result = await usersCollection.updateOne(
@@ -109,6 +139,29 @@ async function run() {
         res
           .status(500)
           .send({ message: "Failed to update profile", error: err });
+      }
+    });
+
+    // donation
+    // create donation request
+    app.post("/donation-requests", async (req, res) => {
+      const requestData = req.body;
+      requestData.createAt = new Date().toISOString;
+      requestData.status = "pending";
+
+      try {
+        const result = await requestsCollection.insertOne(requestData);
+        res.status(201).send({
+          ...result,
+          message: "Donation request has been created.",
+        });
+      } catch (err) {
+        console.error("Error creating donation request:", err.message);
+
+        res.status(500).send({
+          message: "Failed to create donation request.",
+          error: err.message, // optional: remove in production for security
+        });
       }
     });
 
