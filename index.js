@@ -6,7 +6,7 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 dotenv.config();
 
 const app = express();
-const port = process.env.PORT || 5000;
+const port = process.env.PORT || 3000;
 
 // middleware
 app.use(cors());
@@ -175,6 +175,7 @@ async function run() {
     // get donation req details
     app.get("/donation-requests/:id", async (req, res) => {
       const { id } = req.params;
+      console.log(id);
       try {
         const request = await requestsCollection.findOne({
           _id: new ObjectId(id),
@@ -191,11 +192,32 @@ async function run() {
           .send({ message: "Error retrieving request.", error: err });
       }
     });
+    // get my donation
+    app.get("/my-donation-requests/user", async (req, res) => {
+      const { email, status, page = 1, limit = 5 } = req.query;
+      const parsedLimit = parseInt(limit);
+      const skip = (parseInt(page) - 1) * parsedLimit;
 
+      const query = { requesterEmail: email };
+      if (status) query.status = status;
+
+      const total = await requestsCollection.countDocuments(query);
+      const requests = await requestsCollection
+        .find(query)
+        .skip(skip)
+        .limit(parsedLimit)
+        .sort({ createdAt: -1 })
+        .toArray();
+
+      res.send({
+        requests,
+        totalPages: Math.ceil(total / parsedLimit),
+      });
+    });
     // update donation request
     app.patch("/donation-requests/:id/donate", async (req, res) => {
       const { id } = req.params;
-      const donorInfo = req.body; // { donorName, donorEmail }
+      const donorInfo = req.body;
 
       try {
         const updateResult = await requestsCollection.updateOne(
@@ -203,9 +225,9 @@ async function run() {
           {
             $set: {
               status: "inprogress",
-              donar: {
-                donorName: donorInfo.donorName,
-                donorEmail: donorInfo.donorEmail,
+              donor: {
+                name: donorInfo.donorName,
+                email: donorInfo.donorEmail,
               },
             },
           }
@@ -223,6 +245,82 @@ async function run() {
         res
           .status(500)
           .send({ message: "Error updating request.", error: err });
+      }
+    });
+    app.patch("/donation-requests/:id", async (req, res) => {
+      const { id } = req.params;
+      const updateData = req.body;
+      console.log(id);
+
+      try {
+        const result = await requestsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updateData }
+        );
+
+        res.send(result);
+      } catch (error) {
+        console.error("Update Error:", error);
+        res.status(500).send({ error: "Failed to update donation request" });
+      }
+    });
+
+    app.get("/request-status-count", async (req, res) => {
+      const { email } = req.query;
+      try {
+        const result = await requestsCollection
+          .aggregate([
+            {
+              $match: { requesterEmail: email },
+            },
+            {
+              $facet: {
+                statusBreakdown: [
+                  {
+                    $group: {
+                      _id: "$status",
+                      count: { $sum: 1 },
+                    },
+                  },
+                ],
+                total: [{ $count: "total" }],
+              },
+            },
+          ])
+          .toArray();
+
+        res.send(result[0]);
+      } catch (error) {
+        console.error("Aggregation error:", error);
+        res.status(500).send({ error: "Failed to aggregate status counts." });
+      }
+    });
+
+    // delete request
+    app.delete("/donation-requests/:id", async (req, res) => {
+      const id = req.params.id;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ message: "Invalid ID format" });
+      }
+
+      try {
+        const result = await requestsCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        if (result.deletedCount === 0) {
+          return res
+            .status(404)
+            .json({ message: "Donation request not found" });
+        }
+
+        res
+          .status(200)
+          .json({ message: "Donation request deleted successfully" });
+      } catch (error) {
+        console.error("Error deleting donation request:", error);
+        res.status(500).json({ message: "Internal server error" });
       }
     });
 
