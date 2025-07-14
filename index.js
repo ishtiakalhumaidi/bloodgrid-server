@@ -27,6 +27,7 @@ async function run() {
     const db = client.db("bloodGrid_DB");
     const usersCollection = db.collection("users");
     const requestsCollection = db.collection("requests");
+    const blogsCollection = db.collection("blogs");
 
     // add user to db
     app.post("/add-user", async (req, res) => {
@@ -146,7 +147,7 @@ async function run() {
     // create donation request
     app.post("/donation-requests", async (req, res) => {
       const requestData = req.body;
-      requestData.createAt = new Date().toISOString;
+      requestData.createdAt = new Date().toISOString();
       requestData.status = "pending";
 
       try {
@@ -162,6 +163,86 @@ async function run() {
           message: "Failed to create donation request.",
           error: err.message, // optional: remove in production for security
         });
+      }
+    });
+    // get pending donation req
+    app.get("/donation-requests", async (req, res) => {
+      const status = req.query.status;
+      const query = status ? { status } : {};
+      const result = await requestsCollection.find(query).toArray();
+      res.send(result);
+    });
+    // get donation req details
+    app.get("/donation-requests/:id", async (req, res) => {
+      const { id } = req.params;
+      try {
+        const request = await requestsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!request) {
+          return res
+            .status(404)
+            .send({ message: "Donation request not found." });
+        }
+        res.send(request);
+      } catch (err) {
+        res
+          .status(500)
+          .send({ message: "Error retrieving request.", error: err });
+      }
+    });
+
+    // update donation request
+    app.patch("/donation-requests/:id/donate", async (req, res) => {
+      const { id } = req.params;
+      const donorInfo = req.body; // { donorName, donorEmail }
+
+      try {
+        const updateResult = await requestsCollection.updateOne(
+          { _id: new ObjectId(id), status: "pending" },
+          {
+            $set: {
+              status: "inprogress",
+              donar: {
+                donorName: donorInfo.donorName,
+                donorEmail: donorInfo.donorEmail,
+              },
+            },
+          }
+        );
+
+        if (updateResult.modifiedCount === 0) {
+          return res.status(400).send({
+            message:
+              "Unable to confirm donation. It may have already been claimed.",
+          });
+        }
+
+        res.send({ message: "Donation confirmed. Status set to inprogress." });
+      } catch (err) {
+        res
+          .status(500)
+          .send({ message: "Error updating request.", error: err });
+      }
+    });
+
+    // blogs
+    // add blog
+    app.post("/blogs", async (req, res) => {
+      const blog = req.body;
+
+      blog.createAt = new Date().toISOString();
+
+      try {
+        const result = await blogsCollection.insertOne(blog);
+        res.status(201).send({
+          insertedId: result.insertedId,
+          acknowledged: result.acknowledged,
+          message: "Blog has been added successfully.",
+        });
+      } catch (err) {
+        console.error("Blog insertion error:", err);
+        res.status(500).send({ message: "Failed to add the blog." });
       }
     });
 
