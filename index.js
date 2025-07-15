@@ -1,9 +1,9 @@
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
-const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-
 dotenv.config();
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -11,6 +11,18 @@ const port = process.env.PORT || 3000;
 // middleware
 app.use(cors());
 app.use(express.json());
+
+
+var admin = require("firebase-admin");
+
+var serviceAccount = require("path/to/serviceAccountKey.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+
+
+
 
 const uri = process.env.MONGODB_URI;
 
@@ -28,6 +40,21 @@ async function run() {
     const usersCollection = db.collection("users");
     const requestsCollection = db.collection("requests");
     const blogsCollection = db.collection("blogs");
+    const paymentsCollection = db.collection("payments");
+
+    // custom middlewares
+    const verifyFirebaseToken = async (req, res, next) => {
+      const authHeaders = req.headers.authorization;
+      if (!authHeaders) {
+        return res.status(401).send({ message: "Unauthorized access" });
+      }
+      const token = authHeaders.split(" ")[1];
+      if (!token) {
+        return res.status(401).send({ message: "Unauthorized access" });
+      }
+      console.log("header", token);
+      next();
+    };
 
     // add user to db
     app.post("/add-user", async (req, res) => {
@@ -51,6 +78,27 @@ async function run() {
         res.status(500).send({ message: "Failed to add the user." });
       }
     });
+    // user login update
+
+    app.patch("/users/:email/last-login", async (req, res) => {
+      const { email } = req.params;
+
+      try {
+        const result = await usersCollection.updateOne(
+          { email },
+          {
+            $set: {
+              loginAt: new Date().toISOString(),
+            },
+          }
+        );
+
+        res.json({ modified: result.modifiedCount > 0 });
+      } catch (error) {
+        res.status(500).json({ error: "Failed to update last login" });
+      }
+    });
+
     // get user
     app.get("/user", async (req, res) => {
       const email = req.query.email;
@@ -193,27 +241,31 @@ async function run() {
       }
     });
     // get my donation
-    app.get("/my-donation-requests/user", async (req, res) => {
-      const { email, status, page = 1, limit = 5 } = req.query;
-      const parsedLimit = parseInt(limit);
-      const skip = (parseInt(page) - 1) * parsedLimit;
+    app.get(
+      "/my-donation-requests/user",
+      verifyFirebaseToken,
+      async (req, res) => {
+        const { email, status, page = 1, limit = 5 } = req.query;
+        const parsedLimit = parseInt(limit);
+        const skip = (parseInt(page) - 1) * parsedLimit;
 
-      const query = { requesterEmail: email };
-      if (status) query.status = status;
+        const query = { requesterEmail: email };
+        if (status) query.status = status;
 
-      const total = await requestsCollection.countDocuments(query);
-      const requests = await requestsCollection
-        .find(query)
-        .skip(skip)
-        .limit(parsedLimit)
-        .sort({ createdAt: -1 })
-        .toArray();
+        const total = await requestsCollection.countDocuments(query);
+        const requests = await requestsCollection
+          .find(query)
+          .skip(skip)
+          .limit(parsedLimit)
+          .sort({ createdAt: -1 })
+          .toArray();
 
-      res.send({
-        requests,
-        totalPages: Math.ceil(total / parsedLimit),
-      });
-    });
+        res.send({
+          requests,
+          totalPages: Math.ceil(total / parsedLimit),
+        });
+      }
+    );
     // update donation request
     app.patch("/donation-requests/:id/donate", async (req, res) => {
       const { id } = req.params;
@@ -295,6 +347,108 @@ async function run() {
         res.status(500).send({ error: "Failed to aggregate status counts." });
       }
     });
+    // admin dashboard
+    app.get("/admin/dashboard-stats", async (req, res) => {
+      try {
+        const totalUsers = await usersCollection.countDocuments();
+        const totalDonationRequests = await requestsCollection.countDocuments();
+        const funds = await paymentsCollection
+          .aggregate([{ $group: { _id: null, total: { $sum: "$amount" } } }])
+          .toArray();
+
+        const totalFunds = funds[0]?.total || 0;
+
+        res.send({
+          totalUsers,
+          totalDonationRequests,
+          totalFunds,
+        });
+      } catch (error) {
+        res.status(500).send({ message: "Failed to load stats", error });
+      }
+    });
+
+    app.get("/admin/users", async (req, res) => {
+      try {
+        const { page = 1, limit = 10, status = "all" } = req.query;
+        const filter = status !== "all" ? { status } : {};
+
+        const users = await usersCollection
+          .find(filter)
+          .skip((parseInt(page) - 1) * parseInt(limit))
+          .limit(parseInt(limit))
+          .toArray();
+
+        const total = await usersCollection.countDocuments();
+
+        res.send({
+          users,
+          totalPages: Math.ceil(total / limit),
+          total,
+        });
+      } catch (error) {
+        res.status(500).send({ error: "Failed to fetch users." });
+      }
+    });
+
+    // admin
+    app.get("/admin/donation-requests", async (req, res) => {
+      try {
+        const { page = 1, limit = 10, status = "all" } = req.query;
+        const filter = status !== "all" ? { status } : {};
+
+        const requests = await requestsCollection
+          .find(filter)
+          .skip((parseInt(page) - 1) * parseInt(limit))
+          .limit(parseInt(limit))
+          .toArray();
+
+        const total = await requestsCollection.countDocuments();
+
+        res.send({
+          requests,
+          totalPages: Math.ceil(total / limit),
+        });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Failed to fetch donation requests." });
+      }
+    });
+
+    app.patch("/admin/users/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const updates = req.body;
+
+        if (!updates || (!updates.role && !updates.status)) {
+          return res.status(400).send({ error: "No valid fields to update." });
+        }
+
+        const filter = { _id: new ObjectId(id) };
+        const updateDoc = { $set: {} };
+
+        if (updates.role) {
+          updateDoc.$set.role = updates.role;
+        }
+        if (updates.status) {
+          updateDoc.$set.status = updates.status;
+        }
+
+        const result = await usersCollection.updateOne(filter, updateDoc);
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ error: "User not found." });
+        }
+
+        res.send({
+          message: "User updated successfully.",
+          modifiedCount: result.modifiedCount,
+        });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Failed to update user." });
+      }
+    });
 
     // delete request
     app.delete("/donation-requests/:id", async (req, res) => {
@@ -330,7 +484,7 @@ async function run() {
       const blog = req.body;
 
       blog.createdAt = new Date().toISOString();
-      blog.status = "published";
+      blog.status = "draft";
 
       try {
         const result = await blogsCollection.insertOne(blog);
@@ -348,14 +502,107 @@ async function run() {
     // get blog
     app.get("/blogs", async (req, res) => {
       try {
+        const { role, status } = req.query;
+
+        let filter = {};
+
+        if (role === "admin" || role === "volunteer") {
+          if (status) {
+            filter.status = status;
+          }
+        } else {
+          filter.status = "published";
+        }
+
         const blogs = await blogsCollection
-          .find({ status: "published" })
+          .find(filter)
+          .sort({ createdAt: -1 })
           .toArray();
         res.send(blogs);
       } catch (error) {
         res.status(500).send({ error: "Failed to fetch blogs." });
       }
     });
+    // update status
+    app.patch("/blogs/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const updatedFields = req.body;
+
+        const blog = await blogsCollection.findOne({ _id: new ObjectId(id) });
+        if (!blog) {
+          return res.status(404).send({ message: "Blog not found" });
+        }
+
+        const statusInUpdate = Object.prototype.hasOwnProperty.call(
+          updatedFields,
+          "status"
+        );
+        const statusChanged =
+          statusInUpdate && updatedFields.status !== blog.status;
+
+        if (!statusChanged) {
+          updatedFields.updatedAt = new Date().toISOString();
+        }
+
+        const result = await blogsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedFields }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ message: "Blog not found" });
+        }
+
+        res.send({ modifiedCount: result.modifiedCount });
+      } catch (error) {
+        console.error("Error updating blog:", error);
+        res.status(500).send({ message: "Failed to update blog" });
+      }
+    });
+
+    // delete blog
+    app.delete("/blogs/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const result = await blogsCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: "Failed to delete blog." });
+      }
+    });
+
+    // blog state
+    app.get("/blogs/stats", async (req, res) => {
+      try {
+        const result = await blogsCollection
+          .aggregate([
+            {
+              $facet: {
+                statusBreakdown: [
+                  { $group: { _id: "$status", count: { $sum: 1 } } },
+                ],
+                total: [{ $count: "total" }],
+              },
+            },
+            {
+              $project: {
+                statusBreakdown: 1,
+                total: { $arrayElemAt: ["$total.total", 0] },
+              },
+            },
+          ])
+          .toArray();
+
+        res.send(result[0]);
+      } catch (error) {
+        console.error("Error fetching blog stats:", error);
+        res.status(500).send({ error: "Failed to fetch blog stats." });
+      }
+    });
+
     // get blog details
     app.get("/blogs/:id", async (req, res) => {
       const id = req.params.id;
@@ -368,6 +615,54 @@ async function run() {
       } catch (error) {
         res.status(500).send({ error: "Failed to fetch blog." });
       }
+    });
+
+    // Create a payment intent endpoint
+    app.post("/api/create-payment-intent", async (req, res) => {
+      try {
+        const { amount, currency = "usd" } = req.body;
+
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: amount * 100,
+          currency,
+        });
+
+        res.json({ clientSecret: paymentIntent.client_secret });
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+    // save payment
+    app.post("/api/save-payment", async (req, res) => {
+      try {
+        const { paymentIntentId, amount, email } = req.body;
+
+        if (!paymentIntentId || !amount || !email) {
+          return res.status(400).json({ message: "Missing payment details" });
+        }
+
+        const paymentData = {
+          paymentIntentId,
+          email,
+          amount,
+          paidAt: new Date(),
+          status: "completed",
+        };
+
+        const result = await paymentsCollection.insertOne(paymentData);
+        res.send({ success: true, insertedId: result.insertedId });
+      } catch (error) {
+        console.error("Save payment error:", error);
+        res.status(500).send({ message: "Failed to save payment" });
+      }
+    });
+    // get payment details
+    app.get("/fundraiser-payments", async (req, res) => {
+      const payments = await paymentsCollection
+        .find()
+        .sort({ paidAt: -1 })
+        .toArray();
+      res.send(payments);
     });
 
     // Send a ping to confirm a successful connection
