@@ -2,3 +2,4 @@ node_modules
 .env
 sak_firebaseAuth.json
 .vercel
+sak_firebaseAuth.json 
