@@ -282,8 +282,16 @@ async function run() {
     });
     // get pending donation req
     app.get("/donation-requests", async (req, res) => {
-      const status = req.query.status;
-      const query = status ? { status } : {};
+      const { status, bloodGroup } = req.query;
+      let query = {};
+      if (status) {
+        query.status = status;
+      }
+      if (bloodGroup && bloodGroup !== "all") {
+        query.bloodGroup = bloodGroup;
+      }
+      
+
       const result = await requestsCollection.find(query).toArray();
       res.send(result);
     });
